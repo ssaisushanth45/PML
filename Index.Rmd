@@ -1,5 +1,5 @@
 ---
-title: "PML Course Project"
+title: "PML Course Project: A prediction analysis of how well exercise (weight lifting) is done using wearable techology and machine learning"
 author: "Sai S Sampathkumar"
 date: "13 July 2017"
 output: html_document
@@ -9,22 +9,436 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+## Qualitative Activity Recognition of Weight Lifting Exercises
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+The following is a recreation of the prediction analysis done by the original authors to understand how well test subjects perform a weight lifting exercise. 
 
-```{r cars}
-summary(cars)
+Same data from the paper has been sourced from:
+<http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises>
+
+## Executive Summary
+
+The dataset for training our prediction model contained 19622 observations with 159 variables and response(classe). This dataset was studied and compressed to exclude variables (100 variables) that were calculated measures of the recorded metrics (for details - refer 'Feature Selection' in the paper).
+
+The pruned data set was then partitioned into a train dataset and a validation dataset (70/30 split) to evaluate and find the best model. We fit 3 model algorithms - rpart classification, random forest and support vector machine) and found that random forest to be the best predictive model (99.9% accuracy and ~0.1% out of the bag error estimate - on the validation data set). We then used the RF model for prediction on the given 20 test sets. 
+
+```{r, echo=FALSE, eval=TRUE}
+# loading required packages
+suppressMessages(suppressWarnings(library(caret)))
+suppressMessages(suppressWarnings(library(ElemStatLearn)))
+suppressMessages(suppressWarnings(library(AppliedPredictiveModeling)))
+suppressMessages(suppressWarnings(library(rpart)))
+suppressMessages(suppressWarnings(library(pgmm)))
+suppressMessages(suppressWarnings(library(gbm)))
+suppressMessages(suppressWarnings(library(mgcv)))
+suppressMessages(suppressWarnings(library(e1071)))
+suppressMessages(suppressWarnings(library(dplyr)))
+suppressMessages(suppressWarnings(library(tidyr)))
+suppressMessages(suppressWarnings(library(randomForest)))
+suppressMessages(suppressWarnings(library(rattle)))
+suppressMessages(suppressWarnings(library(ggplot2)))
+
+# loading data sets
+
+orig_train <- read.csv("C:/Users/ssais/Documents/11. Coursework/1. Data Science Specialization/8. Practical Machine Learning/2. Data/pml-training.csv")
+orig_test  <- read.csv("C:/Users/ssais/Documents/11. Coursework/1. Data Science Specialization/8. Practical Machine Learning/2. Data/pml-testing.csv")
+dim(orig_train)
+
 ```
 
-## Including Plots
+## Data Preparation
 
-You can also embed plots, for example:
+Steps followed to clean and partition the given training data:
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+1. Data summary showed a lot of variables having NA's and blanks. Counting the #NAs per column showed that about 60 columns had >90% NAs. These can be eliminated from training as imputing such a large portion of cells could achieve misleading results.
+2. Min, Max, Amplitude, Skewness and Kurtosis measures columns are also eliminated as they are mostly blanks. Again, imputing this would not be a good idea.
+3. Created a new Build dataset with pruned colummns. Username and X columns have also been eliminated as they could unduly influence the model.
+4. Created a new Train data set with 70% of data and Validation set with 30% of original training data set. 
+5. 20 Test cases are left aside but columns have been pruned similar to train & validation data sets.
+
+Dimensions of all three (Train, Validation, Test) datasets shown below.
+
+```{r, echo=FALSE, eval=TRUE}
+# rearranging column Classe (Y) to first column
+movetofirst <- function(data, move) {
+  data[c(move, setdiff(names(data), move))]
+}
+orig_train <- movetofirst(orig_train, c("classe"))
+
+# data summary (commented for report purpose)
+# summary(orig_train, na.rm=FALSE)
+
+# count number of NA's in each column and findout which columns have more than 30% NAs in the column from the total number of observations
+
+dfna <- data.frame(nacounts = colSums(is.na(orig_train)))
+nacols <- data.frame(nacounts = dfna[which(dfna$nacounts > 0.30* length(orig_train$X)),0])
+
+narows <- data.frame(navars=rownames(nacols))
+colnam <- names(orig_train)
+colneed1 <- !(colnam%in%narows$navars)
+
+# data summary (commented for report purpose)
+# summary(orig_train, na.rm=FALSE)
+# we see that skewness, kurtosis, max, min and amplitude variables have mostly blanks and so can be eliminated
+
+mincol  <- orig_train[1,which(grepl("*min", colnam))]
+maxcol  <- orig_train[1,which(grepl("*max", colnam))]
+ampcol  <- orig_train[1,which(grepl("*ampl", colnam))]
+skewcol  <- orig_train[1,which(grepl("*skew", colnam))]
+kurtcol  <- orig_train[1,which(grepl("*kurt", colnam))]
+
+dropcol <- names(cbind(mincol,maxcol,ampcol,skewcol,kurtcol))
+colneed2 <- !(colnam%in%dropcol)
+
+cols <- data.frame(NAS = colneed1, Blanks = colneed2, Both = colneed1&colneed2)
+
+# create build data with only columns that are not NAs or Blanks or errors Div/0
+
+build <- orig_train[,cols$Both]
+
+# remove dataframes not needed anymore
+rm("dfna")
+rm("nacols")
+rm("narows")
+rm("cols")
+rm("dropcol")
+rm("mincol")
+rm("maxcol")
+rm("ampcol")
+rm("skewcol")
+rm("kurtcol")
+
+# do the same as above for the test data set
+
+# data summary (commented for report purpose)
+#summary(orig_test, na.rm=FALSE)
+
+# count number of NA's in each column and findout which columns have more than 30% NAs in the column from the total number of observations
+
+dfna <- data.frame(nacounts = colSums(is.na(orig_test)))
+nacols <- data.frame(nacounts = dfna[which(dfna$nacounts > 0.30* length(orig_test$X)),0])
+
+narows <- data.frame(navars=rownames(nacols))
+colnam <- names(orig_test)
+colneed1 <- !(colnam%in%narows$navars)
+
+# data summary (commented for report purpose)
+# summary(orig_test, na.rm=FALSE)
+# we see that skewness, kurtosis, max, min and amplitude variables have mostly blanks and so can be eliminated
+
+mincol  <- orig_test[1,which(grepl("*min", colnam))]
+maxcol  <- orig_test[1,which(grepl("*max", colnam))]
+ampcol  <- orig_test[1,which(grepl("*ampl", colnam))]
+skewcol  <- orig_test[1,which(grepl("*skew", colnam))]
+kurtcol  <- orig_test[1,which(grepl("*kurt", colnam))]
+
+dropcol <- names(cbind(mincol,maxcol,ampcol,skewcol,kurtcol))
+colneed2 <- !(colnam%in%dropcol)
+
+cols <- data.frame(NAS = colneed1, Blanks = colneed2, Both = colneed1&colneed2)
+
+# create test data with only columns that are not NAs or Blanks or errors Div/0
+
+test <- orig_test[,cols$Both]
+
+# remove dataframes not needed anymore
+rm("dfna")
+rm("nacols")
+rm("narows")
+rm("cols")
+rm("dropcol")
+rm("mincol")
+rm("maxcol")
+rm("ampcol")
+rm("skewcol")
+rm("kurtcol")
+
+# remove username as this should NOT be used; names of people as predictor unduly affects prediction
+# also removed problemid from test data and added a dummy classe column with 5 levels 
+
+build$X <- NULL
+test$X <- NULL
+build$user_name <- NULL
+test$user_name <- NULL
+test$problem_id <- NULL
+test$classe <- as.factor(rep(c("A","B","C","D","E"),4))
+test <- movetofirst(test, c("classe"))
+levels(test$cvtd_timestamp) <- levels(build$cvtd_timestamp)
+levels(test$new_window) <- levels(build$new_window)
+
+
+# data partitioning
+
+inbuild <- createDataPartition(y = build$classe, p  = 0.7, list = FALSE)
+intrain <- build[inbuild,]
+invalidation <- build[-inbuild,]
+print("Training Data Set")
+dim(intrain)
+print("Validation Data Set")
+dim(invalidation)
+print("Original Test Data Set")
+dim(orig_test)
+print("Pruned Test Data Set")
+dim(test)
+
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+## Modeling & Evaluation
+
+
+We fit three models to the train data set.
+
+* Classification Using Rpart
+* Classification Using Random Forest
+* Classification Using Support Vector Machines
+
+### Classification Using Rpart
+
+We see this model does not fit the train data very well. Accuracy ~ 50%.
+```{r, echo=FALSE, eval=TRUE}
+set.seed(100000)
+mfitrpart <- train(classe ~., method = "rpart", data = intrain, preProcess = "knnImpute", na.action= na.pass)
+
+
+# evaluation on the validation set
+pred1 <- predict(mfitrpart, invalidation)
+confusionMatrix(invalidation$classe, pred1)
+
+```
+
+### Classification Using Random Forest
+
+We see that RF trains the model very well and prediction accuarcy on validation set >99% with OOB error rate ~ 0.1%. Couple of noteworthy points:
+
+1. RF does not really need a cross-validation as the RF automatic calculates an OOB estimate but since we are fitting multiple models, we have separate train and validation data sets.
+2. We also reduced the number of trees to 349 to improve the OOB estimate albeit marginal rather than r default of 500.
+```{r, echo=FALSE, eval=TRUE}
+
+set.seed(110000)
+mfitrf <- randomForest(classe~., data = intrain)
+
+which.min(mfitrf$err.rate[,1])
+
+mfitrf <- randomForest(classe~., data = intrain, ntree=349)
+print(mfitrf)
+# evaluation on the validation set
+pred2 <- predict(mfitrf, invalidation)
+confusionMatrix(invalidation$classe, pred2)
+
+```
+
+### Classification Using SVM
+
+We see that SVM trains the model very well also and prediction accuarcy on validation set > 95%. However, it is not better than or at par with RF.
+
+```{r, echo=FALSE, eval=TRUE}
+
+set.seed(101010)
+mfitsvm <- svm(classe~., data = intrain, gamma = 0.02, type="C-classification")
+
+# evaluation on the validation set
+pred3 <- predict(mfitsvm, invalidation)
+confusionMatrix(invalidation$classe, pred3)
+```
+
+## Results Summary
+
+Since Random Forest gives us a really good accuracy of >99% on the validation set and  ~0.1% OOB error estimate (~ out of sample error - since validation set was not used to train model), we use this model on the 20 test cases.
+
+```{r, echo=FALSE}
+
+predtest <- data.frame(pred = predict(mfitrf, test[,-1]))
+
+```
+
+## Appendix
+
+Code for above analysis.
+```{r, echo=TRUE, eval=FALSE}
+
+# loading required packages
+suppressMessages(suppressWarnings(library(caret)))
+suppressMessages(suppressWarnings(library(ElemStatLearn)))
+suppressMessages(suppressWarnings(library(AppliedPredictiveModeling)))
+suppressMessages(suppressWarnings(library(rpart)))
+suppressMessages(suppressWarnings(library(pgmm)))
+suppressMessages(suppressWarnings(library(gbm)))
+suppressMessages(suppressWarnings(library(mgcv)))
+suppressMessages(suppressWarnings(library(e1071)))
+suppressMessages(suppressWarnings(library(dplyr)))
+suppressMessages(suppressWarnings(library(tidyr)))
+suppressMessages(suppressWarnings(library(randomForest)))
+suppressMessages(suppressWarnings(library(rattle)))
+suppressMessages(suppressWarnings(library(ggplot2)))
+
+# loading data sets
+
+orig_train <- read.csv("C:/Users/ssais/Documents/11. Coursework/1. Data Science Specialization/8. Practical Machine Learning/2. Data/pml-training.csv")
+orig_test  <- read.csv("C:/Users/ssais/Documents/11. Coursework/1. Data Science Specialization/8. Practical Machine Learning/2. Data/pml-testing.csv")
+dim(orig_train)
+# rearranging column Classe (Y) to first column
+movetofirst <- function(data, move) {
+  data[c(move, setdiff(names(data), move))]
+}
+orig_train <- movetofirst(orig_train, c("classe"))
+
+# data summary (commented for report purpose)
+# summary(orig_train, na.rm=FALSE)
+
+# count number of NA's in each column and findout which columns have more than 30% NAs in the column from the total number of observations
+
+dfna <- data.frame(nacounts = colSums(is.na(orig_train)))
+nacols <- data.frame(nacounts = dfna[which(dfna$nacounts > 0.30* length(orig_train$X)),0])
+
+narows <- data.frame(navars=rownames(nacols))
+colnam <- names(orig_train)
+colneed1 <- !(colnam%in%narows$navars)
+
+# data summary (commented for report purpose)
+# summary(orig_train, na.rm=FALSE)
+# we see that skewness, kurtosis, max, min and amplitude variables have mostly blanks and so can be eliminated
+
+mincol  <- orig_train[1,which(grepl("*min", colnam))]
+maxcol  <- orig_train[1,which(grepl("*max", colnam))]
+ampcol  <- orig_train[1,which(grepl("*ampl", colnam))]
+skewcol  <- orig_train[1,which(grepl("*skew", colnam))]
+kurtcol  <- orig_train[1,which(grepl("*kurt", colnam))]
+
+dropcol <- names(cbind(mincol,maxcol,ampcol,skewcol,kurtcol))
+colneed2 <- !(colnam%in%dropcol)
+
+cols <- data.frame(NAS = colneed1, Blanks = colneed2, Both = colneed1&colneed2)
+
+# create build data with only columns that are not NAs or Blanks or errors Div/0
+
+build <- orig_train[,cols$Both]
+
+# remove dataframes not needed anymore
+rm("dfna")
+rm("nacols")
+rm("narows")
+rm("cols")
+rm("dropcol")
+rm("mincol")
+rm("maxcol")
+rm("ampcol")
+rm("skewcol")
+rm("kurtcol")
+
+# do the same as above for the test data set
+
+# data summary (commented for report purpose)
+#summary(orig_test, na.rm=FALSE)
+
+# count number of NA's in each column and findout which columns have more than 30% NAs in the column from the total number of observations
+
+dfna <- data.frame(nacounts = colSums(is.na(orig_test)))
+nacols <- data.frame(nacounts = dfna[which(dfna$nacounts > 0.30* length(orig_test$X)),0])
+
+narows <- data.frame(navars=rownames(nacols))
+colnam <- names(orig_test)
+colneed1 <- !(colnam%in%narows$navars)
+
+# data summary (commented for report purpose)
+# summary(orig_test, na.rm=FALSE)
+# we see that skewness, kurtosis, max, min and amplitude variables have mostly blanks and so can be eliminated
+
+mincol  <- orig_test[1,which(grepl("*min", colnam))]
+maxcol  <- orig_test[1,which(grepl("*max", colnam))]
+ampcol  <- orig_test[1,which(grepl("*ampl", colnam))]
+skewcol  <- orig_test[1,which(grepl("*skew", colnam))]
+kurtcol  <- orig_test[1,which(grepl("*kurt", colnam))]
+
+dropcol <- names(cbind(mincol,maxcol,ampcol,skewcol,kurtcol))
+colneed2 <- !(colnam%in%dropcol)
+
+cols <- data.frame(NAS = colneed1, Blanks = colneed2, Both = colneed1&colneed2)
+
+# create test data with only columns that are not NAs or Blanks or errors Div/0
+
+test <- orig_test[,cols$Both]
+
+# remove dataframes not needed anymore
+rm("dfna")
+rm("nacols")
+rm("narows")
+rm("cols")
+rm("dropcol")
+rm("mincol")
+rm("maxcol")
+rm("ampcol")
+rm("skewcol")
+rm("kurtcol")
+
+# remove username as this should NOT be used; names of people as predictor unduly affects prediction
+# also removed problemid from test data and added a dummy classe column with 5 levels 
+
+build$X <- NULL
+test$X <- NULL
+build$user_name <- NULL
+test$user_name <- NULL
+test$problem_id <- NULL
+test$classe <- as.factor(rep(c("A","B","C","D","E"),4))
+test <- movetofirst(test, c("classe"))
+levels(test$cvtd_timestamp) <- levels(build$cvtd_timestamp)
+levels(test$new_window) <- levels(build$new_window)
+
+
+# data partitioning
+
+inbuild <- createDataPartition(y = build$classe, p  = 0.7, list = FALSE)
+intrain <- build[inbuild,]
+invalidation <- build[-inbuild,]
+print("Training Data Set")
+dim(intrain)
+print("Validation Data Set")
+dim(invalidation)
+print("Original Test Data Set")
+dim(orig_test)
+print("Pruned Test Data Set")
+dim(test)
+
+# classification tree
+set.seed(100000)
+mfitrpart <- train(classe ~., method = "rpart", data = intrain, preProcess = "knnImpute", na.action= na.pass)
+
+
+# evaluation on the validation set
+pred1 <- predict(mfitrpart, invalidation)
+confusionMatrix(invalidation$classe, pred1)
+
+# Random Forest
+
+set.seed(110000)
+mfitrf <- randomForest(classe~., data = intrain)
+which.min(mfitrf$err.rate[,1])
+mfitrf <- randomForest(classe~., data = intrain, ntree=349)
+print(mfitrf)
+# evaluation on the validation set
+pred2 <- predict(mfitrf, invalidation)
+confusionMatrix(invalidation$classe, pred2)
+
+
+# SVM
+set.seed(101010)
+mfitsvm <- svm(classe~., data = intrain, gamma = 0.02, type="C-classification")
+
+# evaluation on the validation set
+pred3 <- predict(mfitsvm, invalidation)
+confusionMatrix(invalidation$classe, pred3)
+
+###########################
+
+predtest <- data.frame(pred = predict(mfitrf, test[,-1]))
+
+```
+
+## Citation 
+
+*Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th Augmented Human (AH) International Conference in cooperation with ACM SIGCHI (Augmented Human'13) . Stuttgart, Germany: ACM SIGCHI, 2013*
+
+Read more: <http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201#ixzz4mhLqO6OA>
